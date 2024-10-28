@@ -1,3 +1,5 @@
+use crate::kafka_producer::KafkaProducer;
+
 use anyhow::Result;
 
 use ethers::{
@@ -5,26 +7,41 @@ use ethers::{
         providers::{JsonRpcClient, Middleware, Provider},
         types::H256,
     },
-    types::Transaction,
+    types::{Block, Transaction},
 };
 use futures::{stream, StreamExt};
+use std::env;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::time::{sleep, Duration};
 
 const BUFFER_SIZE: usize = 10;
 
 pub struct Crawler<T: JsonRpcClient> {
     provider: Arc<Provider<T>>,
     from_block: u64,
+    kafka_producer: Arc<KafkaProducer>,
+    tsx_topic: String,
+    block_topic: String,
 }
 
-async fn fetch_block(provider: Arc<Provider<impl JsonRpcClient>>, block_number: u64) -> Vec<H256> {
+async fn fetch_block(
+    provider: Arc<Provider<impl JsonRpcClient>>,
+    block_number: u64,
+) -> Option<Block<H256>> {
     println!("Fetching block {}", block_number);
     let maybe_block = provider.get_block(block_number).await;
 
     match maybe_block {
-        Ok(Some(block)) => block.transactions,
-        _ => vec![],
+        Ok(Some(block)) => Some(block),
+        Ok(None) => {
+            println!("Block number {} not found.", block_number);
+            None
+        },
+        Err(err) => {
+            println!("Error fetching block {}: {}", block_number, err);
+            None
+        }
     }
 }
 
@@ -43,15 +60,31 @@ async fn fetch_transaction(
 
 impl<T: JsonRpcClient> Crawler<T> {
     pub fn new(provider: Arc<Provider<T>>, from_block: u64) -> Self {
+        let hosts: Vec<String> = env::var("KAFKA_BROKER_HOST")
+            .expect("KAFKA_BROKER_HOST not set")
+            .split(',')
+            .map(|s| s.to_string())
+            .collect();
+        let tsx_topic = env::var("KAFKA_TSX_TOPIC").expect("KAFKA_TSX_TOPIC not set");
+        let block_topic = env::var("KAFKA_BLOCK_TOPIC").expect("KAFKA_BLOCK_TOPIC not set");
+        let kafka_producer = Arc::new(KafkaProducer::new(hosts));
+
         Self {
             provider,
             from_block,
+            kafka_producer,
+            tsx_topic,
+            block_topic,
         }
     }
     pub async fn get_transactions(self) -> Result<Vec<Transaction>> {
         let Crawler {
             provider,
             from_block,
+            kafka_producer,
+            tsx_topic,
+            block_topic,
+            ..
         } = self;
 
         let to_block = provider.get_block_number().await?.as_u64();
@@ -60,10 +93,40 @@ impl<T: JsonRpcClient> Crawler<T> {
         let now = Instant::now();
 
         let address_transactions: Vec<Transaction> = stream::iter(from_block..=to_block)
-            .map(|block_number| fetch_block(provider.clone(), block_number))
+            .map(|block_number| {
+                let block_topic_clone = block_topic.clone();
+                let provider_clone = provider.clone();
+                let kafka_producer_clone = kafka_producer.clone();
+                async move {
+                    sleep(Duration::from_millis(500)).await;
+                    match fetch_block(provider_clone, block_number).await {
+                        Some(block) => {
+                            kafka_producer_clone.send_message(block_topic_clone, &block.clone());
+                            block.transactions
+                        }
+                        None => {
+                            // Handle the None case, e.g., log a warning or return an empty vector
+                            println!("Block number {} not found.", block_number);
+                            Vec::new()
+                        }
+                    }
+                }
+            })
             .buffered(BUFFER_SIZE)
             .flat_map(stream::iter)
-            .map(|tx| fetch_transaction(provider.clone(), tx))
+            .map(|tx| {
+                let tsx_topic_clone = tsx_topic.clone();
+                let provider_clone = provider.clone();
+                let kafka_producer_clone = kafka_producer.clone();
+                async move {
+                    sleep(Duration::from_millis(500)).await;
+                    let transaction = fetch_transaction(provider_clone, tx).await;
+                    if let Some(tx) = &transaction {
+                        kafka_producer_clone.send_message(tsx_topic_clone, tx);
+                    }
+                    transaction
+                }
+            })
             .buffered(BUFFER_SIZE)
             .filter_map(|tx| async { tx })
             .collect()
@@ -90,16 +153,11 @@ mod tests {
     async fn test_fetch_block() -> Result<()> {
         let mock_provider = MockProvider::new();
 
-        let mut block: Block<H256> = Block::default();
-
-        block.transactions = vec![H256::zero()];
+        let block: Block<H256> = Block::default();
         mock_provider.push(block)?;
 
-        let transactions = fetch_block(setup_provider(mock_provider), 1).await;
-
-        assert_eq!(transactions.len(), 1);
-        assert_eq!(transactions[0], H256::zero());
-
+        let block = fetch_block(setup_provider(mock_provider), 1).await;
+        assert_eq!(block, Some(Block::default()));
         Ok(())
     }
 

@@ -1,4 +1,5 @@
 pub mod crawler;
+pub mod kafka_producer;
 #[cfg(test)]
 pub mod mock;
 use crate::crawler::Crawler;
@@ -34,6 +35,5 @@ async fn main() {
         .parse::<u64>()
         .expect("Invalid FROM_BLOCK");
     let crawler = Crawler::new(provider, from_block.clone());
-    let txs = crawler.get_transactions().await;
-    println!("{txs:?}")
+    let _ = crawler.get_transactions().await;
 }
