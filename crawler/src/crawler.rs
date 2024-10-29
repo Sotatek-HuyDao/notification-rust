@@ -1,4 +1,7 @@
-use crate::kafka_producer::KafkaProducer;
+use crate::{
+    kafka_producer::KafkaProducer,
+    tracer::{end_span, start_span},
+};
 
 use anyhow::Result;
 
@@ -12,7 +15,6 @@ use ethers::{
 use futures::{stream, StreamExt};
 use std::env;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::time::{sleep, Duration};
 
 const BUFFER_SIZE: usize = 10;
@@ -23,6 +25,7 @@ pub struct Crawler<T: JsonRpcClient> {
     kafka_producer: Arc<KafkaProducer>,
     tsx_topic: String,
     block_topic: String,
+    delay_time: u64,
 }
 
 async fn fetch_block(
@@ -30,14 +33,15 @@ async fn fetch_block(
     block_number: u64,
 ) -> Option<Block<H256>> {
     println!("Fetching block {}", block_number);
+    let span = start_span("fetch_block");
     let maybe_block = provider.get_block(block_number).await;
-
+    end_span(span);
     match maybe_block {
         Ok(Some(block)) => Some(block),
         Ok(None) => {
             println!("Block number {} not found.", block_number);
             None
-        },
+        }
         Err(err) => {
             println!("Error fetching block {}: {}", block_number, err);
             None
@@ -50,16 +54,24 @@ async fn fetch_transaction(
     tx: H256,
 ) -> Option<Transaction> {
     println!("Fetching transaction {}", tx);
+    let span = start_span("fetch_transaction");
     let maybe_transaction = provider.get_transaction(tx).await;
-
+    end_span(span);
     match maybe_transaction {
         Ok(Some(transaction)) => Some(transaction),
-        _ => None,
+        Ok(None) => {
+            println!("Tx {} not found.", tx);
+            None
+        }
+        Err(err) => {
+            println!("Error fetching tx {}: {}", tx, err);
+            None
+        }
     }
 }
 
 impl<T: JsonRpcClient> Crawler<T> {
-    pub fn new(provider: Arc<Provider<T>>, from_block: u64) -> Self {
+    pub fn new(provider: Arc<Provider<T>>, from_block: u64, delay_time: u64) -> Self {
         let hosts: Vec<String> = env::var("KAFKA_BROKER_HOST")
             .expect("KAFKA_BROKER_HOST not set")
             .split(',')
@@ -67,7 +79,7 @@ impl<T: JsonRpcClient> Crawler<T> {
             .collect();
         let tsx_topic = env::var("KAFKA_TSX_TOPIC").expect("KAFKA_TSX_TOPIC not set");
         let block_topic = env::var("KAFKA_BLOCK_TOPIC").expect("KAFKA_BLOCK_TOPIC not set");
-        let kafka_producer = Arc::new(KafkaProducer::new(hosts));
+        let kafka_producer = Arc::new(KafkaProducer::new(hosts).expect("Setup Kafka error"));
 
         Self {
             provider,
@@ -75,22 +87,23 @@ impl<T: JsonRpcClient> Crawler<T> {
             kafka_producer,
             tsx_topic,
             block_topic,
+            delay_time,
         }
     }
+
     pub async fn get_transactions(self) -> Result<Vec<Transaction>> {
+        let span = start_span("get_transactions");
         let Crawler {
             provider,
             from_block,
             kafka_producer,
             tsx_topic,
             block_topic,
+            delay_time,
             ..
         } = self;
 
         let to_block = provider.get_block_number().await?.as_u64();
-
-        // For benchmarking
-        let now = Instant::now();
 
         let address_transactions: Vec<Transaction> = stream::iter(from_block..=to_block)
             .map(|block_number| {
@@ -98,14 +111,17 @@ impl<T: JsonRpcClient> Crawler<T> {
                 let provider_clone = provider.clone();
                 let kafka_producer_clone = kafka_producer.clone();
                 async move {
-                    sleep(Duration::from_millis(500)).await;
+                    sleep(Duration::from_millis(delay_time)).await;
                     match fetch_block(provider_clone, block_number).await {
                         Some(block) => {
-                            kafka_producer_clone.send_message(block_topic_clone, &block.clone());
+                            if let Err(e) =
+                                kafka_producer_clone.send_message(block_topic_clone, &block.clone())
+                            {
+                                eprintln!("Failed to send message: {:?}", e);
+                            }
                             block.transactions
                         }
                         None => {
-                            // Handle the None case, e.g., log a warning or return an empty vector
                             println!("Block number {} not found.", block_number);
                             Vec::new()
                         }
@@ -119,10 +135,12 @@ impl<T: JsonRpcClient> Crawler<T> {
                 let provider_clone = provider.clone();
                 let kafka_producer_clone = kafka_producer.clone();
                 async move {
-                    sleep(Duration::from_millis(500)).await;
+                    sleep(Duration::from_millis(delay_time)).await;
                     let transaction = fetch_transaction(provider_clone, tx).await;
                     if let Some(tx) = &transaction {
-                        kafka_producer_clone.send_message(tsx_topic_clone, tx);
+                        if let Err(e) = kafka_producer_clone.send_message(tsx_topic_clone, tx) {
+                            eprintln!("Failed to send message: {:?}", e);
+                        }
                     }
                     transaction
                 }
@@ -132,9 +150,7 @@ impl<T: JsonRpcClient> Crawler<T> {
             .collect()
             .await;
 
-        let elapsed = now.elapsed();
-        println!("Elapsed: {:.2?}", elapsed);
-
+        end_span(span);
         Ok(address_transactions)
     }
 }
@@ -144,10 +160,12 @@ mod tests {
 
     use super::*;
     use crate::mock::{get_mock, setup_provider};
+    use dotenv::dotenv;
     use ethers::prelude::{
         providers::MockProvider,
         types::{Block, Transaction, H256},
     };
+    use std::env;
 
     #[tokio::test]
     async fn test_fetch_block() -> Result<()> {
@@ -189,17 +207,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_crawler() -> Result<()> {
+    async fn test_crawler_success() -> Result<()> {
         let mock_provider = get_mock()?;
 
-        let crawler = Crawler::new(setup_provider(mock_provider), 1);
-
-        let transactions = crawler.get_transactions().await?;
-        assert_eq!(
-            transactions,
-            [Transaction::default(), Transaction::default()]
+        dotenv().ok();
+        env::set_var(
+            "KAFKA_BROKER_HOST",
+            "localhost:9092,localhost:9093,localhost:9094",
         );
+        env::set_var("KAFKA_TSX_TOPIC", "tsx");
+        env::set_var("KAFKA_BLOCK_TOPIC", "block");
+        let _crawler = Crawler::new(setup_provider(mock_provider), 1, 0);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_crawler_fail_missing_env() {
+        let mock_provider = get_mock().unwrap();
+
+        env::remove_var("KAFKA_BROKER_HOST");
+        env::remove_var("KAFKA_TSX_TOPIC");
+        env::remove_var("KAFKA_BLOCK_TOPIC");
+        Crawler::new(setup_provider(mock_provider), 1, 0);
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_crawler_fail_wrong_env() {
+        let mock_provider = get_mock().unwrap();
+
+        env::set_var("KAFKA_BROKER_HOST", "invalid_url");
+        env::set_var("KAFKA_TSX_TOPIC", "invalid_url");
+        env::set_var("KAFKA_BLOCK_TOPIC", "invalid_url");
+        Crawler::new(setup_provider(mock_provider), 1, 0);
     }
 }

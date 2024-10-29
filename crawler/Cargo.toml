@@ -13,3 +13,7 @@ anyhow = "1.0.71"
 futures = "0.3.28"
 dotenv = "0.15.0"
 kafka = "0.10.0"
+opentelemetry = "0.26.0"
+opentelemetry_sdk = { version = "0.26.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.26.0" }
+opentelemetry-semantic-conventions = "0.26.0"
