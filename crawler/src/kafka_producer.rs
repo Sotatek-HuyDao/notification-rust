@@ -20,7 +20,7 @@ impl KafkaProducer {
         })
     }
 
-    pub fn send_message(&self, topic: String, payload: &impl Serialize) -> Result<(), Error> {
+    pub fn send_message(&self, topic: &String, payload: &impl Serialize) -> Result<(), Error> {
         let mut producer = self.producer.lock().unwrap();
         let buffer = serde_json::to_string(payload).unwrap();
         producer.send(&Record::from_value(&topic, buffer.as_bytes()))?;

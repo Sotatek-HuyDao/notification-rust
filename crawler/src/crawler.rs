@@ -23,13 +23,13 @@ pub struct Crawler<T: JsonRpcClient> {
     provider: Arc<Provider<T>>,
     from_block: u64,
     kafka_producer: Arc<KafkaProducer>,
-    tsx_topic: String,
-    block_topic: String,
+    tsx_topic: Arc<String>,
+    block_topic: Arc<String>,
     delay_time: u64,
 }
 
 async fn fetch_block(
-    provider: Arc<Provider<impl JsonRpcClient>>,
+    provider: &Arc<Provider<impl JsonRpcClient>>,
     block_number: u64,
 ) -> Option<Block<H256>> {
     println!("Fetching block {}", block_number);
@@ -50,7 +50,7 @@ async fn fetch_block(
 }
 
 async fn fetch_transaction(
-    provider: Arc<Provider<impl JsonRpcClient>>,
+    provider: &Arc<Provider<impl JsonRpcClient>>,
     tx: H256,
 ) -> Option<Transaction> {
     println!("Fetching transaction {}", tx);
@@ -85,8 +85,8 @@ impl<T: JsonRpcClient> Crawler<T> {
             provider,
             from_block,
             kafka_producer,
-            tsx_topic,
-            block_topic,
+            tsx_topic: Arc::new(tsx_topic),
+            block_topic: Arc::new(block_topic),
             delay_time,
         }
     }
@@ -107,15 +107,15 @@ impl<T: JsonRpcClient> Crawler<T> {
 
         let address_transactions: Vec<Transaction> = stream::iter(from_block..=to_block)
             .map(|block_number| {
-                let block_topic_clone = block_topic.clone();
-                let provider_clone = provider.clone();
-                let kafka_producer_clone = kafka_producer.clone();
+                let block_topic_clone = Arc::clone(&block_topic);
+                let provider_clone = Arc::clone(&provider);
+                let kafka_producer_clone = Arc::clone(&kafka_producer);
                 async move {
                     sleep(Duration::from_millis(delay_time)).await;
-                    match fetch_block(provider_clone, block_number).await {
+                    match fetch_block(&provider_clone, block_number).await {
                         Some(block) => {
                             if let Err(e) =
-                                kafka_producer_clone.send_message(block_topic_clone, &block.clone())
+                                &kafka_producer_clone.send_message(&block_topic_clone, &block)
                             {
                                 eprintln!("Failed to send message: {:?}", e);
                             }
@@ -131,14 +131,14 @@ impl<T: JsonRpcClient> Crawler<T> {
             .buffered(BUFFER_SIZE)
             .flat_map(stream::iter)
             .map(|tx| {
-                let tsx_topic_clone = tsx_topic.clone();
-                let provider_clone = provider.clone();
-                let kafka_producer_clone = kafka_producer.clone();
+                let tsx_topic_clone = Arc::clone(&tsx_topic);
+                let provider_clone = Arc::clone(&provider);
+                let kafka_producer_clone = Arc::clone(&kafka_producer);
                 async move {
                     sleep(Duration::from_millis(delay_time)).await;
-                    let transaction = fetch_transaction(provider_clone, tx).await;
+                    let transaction = fetch_transaction(&provider_clone, tx).await;
                     if let Some(tx) = &transaction {
-                        if let Err(e) = kafka_producer_clone.send_message(tsx_topic_clone, tx) {
+                        if let Err(e) = &kafka_producer_clone.send_message(&tsx_topic_clone, tx) {
                             eprintln!("Failed to send message: {:?}", e);
                         }
                     }
@@ -174,7 +174,7 @@ mod tests {
         let block: Block<H256> = Block::default();
         mock_provider.push(block)?;
 
-        let block = fetch_block(setup_provider(mock_provider), 1).await;
+        let block = fetch_block(&setup_provider(mock_provider), 1).await;
         assert_eq!(block, Some(Block::default()));
         Ok(())
     }
@@ -191,7 +191,7 @@ mod tests {
 
         mock_provider.push(transaction)?;
 
-        let transaction = fetch_transaction(setup_provider(mock_provider), tx).await;
+        let transaction = fetch_transaction(&setup_provider(mock_provider), tx).await;
 
         Ok(transaction)
     }
