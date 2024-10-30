@@ -1,5 +1,5 @@
 pub mod crawler;
-pub mod kafka_producer;
+pub mod kafka;
 #[cfg(test)]
 pub mod mock;
 pub mod tracer;

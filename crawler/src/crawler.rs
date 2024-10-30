@@ -1,5 +1,5 @@
 use crate::{
-    kafka_producer::KafkaProducer,
+    kafka::KafkaProducer,
     tracer::{end_span, start_span},
 };
 
@@ -77,7 +77,7 @@ impl<T: JsonRpcClient> Crawler<T> {
             .split(',')
             .map(|s| s.to_string())
             .collect();
-        let tsx_topic = env::var("KAFKA_TSX_TOPIC").expect("KAFKA_TSX_TOPIC not set");
+        let tsx_topic = env::var("KAFKA_TX_TOPIC").expect("KAFKA_TX_TOPIC not set");
         let block_topic = env::var("KAFKA_BLOCK_TOPIC").expect("KAFKA_BLOCK_TOPIC not set");
         let kafka_producer = Arc::new(KafkaProducer::new(hosts).expect("Setup Kafka error"));
 
@@ -215,7 +215,7 @@ mod tests {
             "KAFKA_BROKER_HOST",
             "localhost:9092,localhost:9093,localhost:9094",
         );
-        env::set_var("KAFKA_TSX_TOPIC", "tsx");
+        env::set_var("KAFKA_TX_TOPIC", "tx");
         env::set_var("KAFKA_BLOCK_TOPIC", "block");
         let _crawler = Crawler::new(setup_provider(mock_provider), 1, 0);
 
@@ -228,7 +228,7 @@ mod tests {
         let mock_provider = get_mock().unwrap();
 
         env::remove_var("KAFKA_BROKER_HOST");
-        env::remove_var("KAFKA_TSX_TOPIC");
+        env::remove_var("KAFKA_TX_TOPIC");
         env::remove_var("KAFKA_BLOCK_TOPIC");
         Crawler::new(setup_provider(mock_provider), 1, 0);
     }
@@ -239,7 +239,7 @@ mod tests {
         let mock_provider = get_mock().unwrap();
 
         env::set_var("KAFKA_BROKER_HOST", "invalid_url");
-        env::set_var("KAFKA_TSX_TOPIC", "invalid_url");
+        env::set_var("KAFKA_TX_TOPIC", "invalid_url");
         env::set_var("KAFKA_BLOCK_TOPIC", "invalid_url");
         Crawler::new(setup_provider(mock_provider), 1, 0);
     }

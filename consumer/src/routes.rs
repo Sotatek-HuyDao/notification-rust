@@ -1,24 +1,14 @@
-use crate::model::ServiceSchema;
-use async_graphql::http::{playground_source, GraphQLPlaygroundConfig};
+use async_graphql::{
+    http::{playground_source, GraphQLPlaygroundConfig},
+    EmptyMutation, EmptySubscription, Schema,
+};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
     extract::Extension,
-    http::StatusCode,
     response::{Html, IntoResponse},
-    Json,
 };
-use serde::Serialize;
 
-#[derive(Serialize)]
-struct Health {
-    healthy: bool,
-}
-
-pub(crate) async fn health() -> impl IntoResponse {
-    let health = Health { healthy: true };
-
-    (StatusCode::OK, Json(health))
-}
+use crate::controller::QueryRoot;
 
 pub(crate) async fn graphql_playground() -> impl IntoResponse {
     Html(playground_source(
@@ -27,7 +17,7 @@ pub(crate) async fn graphql_playground() -> impl IntoResponse {
 }
 
 pub(crate) async fn graphql_handler(
-    schema: Extension<ServiceSchema>,
+    schema: Extension<Schema<QueryRoot, EmptyMutation, EmptySubscription>>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
     let response = async move { schema.execute(req.into_inner()).await }.await;
