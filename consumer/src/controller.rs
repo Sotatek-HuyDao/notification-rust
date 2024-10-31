@@ -28,16 +28,9 @@ impl QueryRoot {
     async fn latest_blocks(&self, ctx: &Context<'_>, limit: i32) -> Result<Vec<Block>, Error> {
         let storage = ctx.data::<Arc<RwLock<Storage>>>().unwrap();
         let storage = storage.read().await;
-
-        Ok(storage
-            .blocks
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .take(limit as usize)
-            .collect())
+        let mut blocks = storage.blocks.values().cloned().collect::<Vec<_>>();
+        blocks.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(blocks.into_iter().take(limit as usize).collect())
     }
     async fn transaction(
         &self,

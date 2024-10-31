@@ -1,6 +1,7 @@
 use crate::{
     kafka::KafkaProducer,
     tracer::{end_span, start_span},
+    utils::{filter_block, filter_transaction},
 };
 
 use anyhow::Result;
@@ -19,6 +20,11 @@ use tokio::time::{sleep, Duration};
 
 const BUFFER_SIZE: usize = 10;
 
+pub struct FilterOption {
+    pub tx_hash_filter: Option<String>,
+    pub block_hash_filter: Option<String>,
+}
+
 pub struct Crawler<T: JsonRpcClient> {
     provider: Arc<Provider<T>>,
     from_block: u64,
@@ -26,13 +32,14 @@ pub struct Crawler<T: JsonRpcClient> {
     tsx_topic: Arc<String>,
     block_topic: Arc<String>,
     delay_time: u64,
+    filter_options: Arc<FilterOption>,
 }
 
 async fn fetch_block(
     provider: &Arc<Provider<impl JsonRpcClient>>,
     block_number: u64,
 ) -> Option<Block<H256>> {
-    println!("Fetching block {}", block_number);
+    // println!("Fetching block {}", block_number);
     let span = start_span("fetch_block");
     let maybe_block = provider.get_block(block_number).await;
     end_span(span);
@@ -53,7 +60,7 @@ async fn fetch_transaction(
     provider: &Arc<Provider<impl JsonRpcClient>>,
     tx: H256,
 ) -> Option<Transaction> {
-    println!("Fetching transaction {}", tx);
+    // println!("Fetching transaction {}", tx);
     let span = start_span("fetch_transaction");
     let maybe_transaction = provider.get_transaction(tx).await;
     end_span(span);
@@ -71,7 +78,12 @@ async fn fetch_transaction(
 }
 
 impl<T: JsonRpcClient> Crawler<T> {
-    pub fn new(provider: Arc<Provider<T>>, from_block: u64, delay_time: u64) -> Self {
+    pub fn new(
+        provider: Arc<Provider<T>>,
+        from_block: u64,
+        delay_time: u64,
+        filter_options: FilterOption,
+    ) -> Self {
         let hosts: Vec<String> = env::var("KAFKA_BROKER_HOST")
             .expect("KAFKA_BROKER_HOST not set")
             .split(',')
@@ -88,6 +100,7 @@ impl<T: JsonRpcClient> Crawler<T> {
             tsx_topic: Arc::new(tsx_topic),
             block_topic: Arc::new(block_topic),
             delay_time,
+            filter_options: Arc::new(filter_options),
         }
     }
 
@@ -100,6 +113,7 @@ impl<T: JsonRpcClient> Crawler<T> {
             tsx_topic,
             block_topic,
             delay_time,
+            filter_options,
             ..
         } = self;
 
@@ -110,14 +124,22 @@ impl<T: JsonRpcClient> Crawler<T> {
                 let block_topic_clone = Arc::clone(&block_topic);
                 let provider_clone = Arc::clone(&provider);
                 let kafka_producer_clone = Arc::clone(&kafka_producer);
+                let filter_options_clone = Arc::clone(&filter_options);
                 async move {
                     sleep(Duration::from_millis(delay_time)).await;
                     match fetch_block(&provider_clone, block_number).await {
                         Some(block) => {
-                            if let Err(e) =
-                                &kafka_producer_clone.send_message(&block_topic_clone, &block)
-                            {
-                                eprintln!("Failed to send message: {:?}", e);
+                            if filter_block(&block, &filter_options_clone.block_hash_filter) {
+                                let span = start_span("kafka_send_message");
+                                if let Err(e) =
+                                    &kafka_producer_clone.send_message(&block_topic_clone, &block)
+                                {
+                                    eprintln!("Failed to send message: {:?}", e);
+                                }
+                                end_span(span);
+                                println!("Sent block {:?}", block.hash);
+                            } else {
+                                println!("Skip block {:?}", block.hash);
                             }
                             block.transactions
                         }
@@ -134,12 +156,19 @@ impl<T: JsonRpcClient> Crawler<T> {
                 let tsx_topic_clone = Arc::clone(&tsx_topic);
                 let provider_clone = Arc::clone(&provider);
                 let kafka_producer_clone = Arc::clone(&kafka_producer);
+                let filter_options_clone = Arc::clone(&filter_options);
                 async move {
                     sleep(Duration::from_millis(delay_time)).await;
                     let transaction = fetch_transaction(&provider_clone, tx).await;
                     if let Some(tx) = &transaction {
-                        if let Err(e) = &kafka_producer_clone.send_message(&tsx_topic_clone, tx) {
-                            eprintln!("Failed to send message: {:?}", e);
+                        if filter_transaction(tx, &filter_options_clone.tx_hash_filter) {
+                            if let Err(e) = &kafka_producer_clone.send_message(&tsx_topic_clone, tx)
+                            {
+                                eprintln!("Failed to send message: {:?}", e);
+                            }
+                            println!("Sent tx {:?}", tx.hash);
+                        } else {
+                            println!("Skip tx {:?}", tx.hash);
                         }
                     }
                     transaction
@@ -217,7 +246,15 @@ mod tests {
         );
         env::set_var("KAFKA_TX_TOPIC", "tx");
         env::set_var("KAFKA_BLOCK_TOPIC", "block");
-        let _crawler = Crawler::new(setup_provider(mock_provider), 1, 0);
+        let _crawler = Crawler::new(
+            setup_provider(mock_provider),
+            1,
+            0,
+            FilterOption {
+                tx_hash_filter: None,
+                block_hash_filter: None,
+            },
+        );
 
         Ok(())
     }
@@ -230,7 +267,15 @@ mod tests {
         env::remove_var("KAFKA_BROKER_HOST");
         env::remove_var("KAFKA_TX_TOPIC");
         env::remove_var("KAFKA_BLOCK_TOPIC");
-        Crawler::new(setup_provider(mock_provider), 1, 0);
+        Crawler::new(
+            setup_provider(mock_provider),
+            1,
+            0,
+            FilterOption {
+                tx_hash_filter: None,
+                block_hash_filter: None,
+            },
+        );
     }
 
     #[tokio::test]
@@ -241,6 +286,14 @@ mod tests {
         env::set_var("KAFKA_BROKER_HOST", "invalid_url");
         env::set_var("KAFKA_TX_TOPIC", "invalid_url");
         env::set_var("KAFKA_BLOCK_TOPIC", "invalid_url");
-        Crawler::new(setup_provider(mock_provider), 1, 0);
+        Crawler::new(
+            setup_provider(mock_provider),
+            1,
+            0,
+            FilterOption {
+                tx_hash_filter: None,
+                block_hash_filter: None,
+            },
+        );
     }
 }

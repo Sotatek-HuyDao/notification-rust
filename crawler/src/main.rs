@@ -3,9 +3,11 @@ pub mod kafka;
 #[cfg(test)]
 pub mod mock;
 pub mod tracer;
+pub mod utils;
 use crate::crawler::Crawler;
 use anyhow::Result;
-
+use clap::Parser;
+use crawler::FilterOption;
 use dotenv::dotenv;
 use ethers::prelude::providers::Http;
 use ethers::prelude::{
@@ -29,10 +31,19 @@ fn get_provider() -> Result<Provider<impl JsonRpcClient>> {
     )))
 }
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long)]
+    tx_hash_filter: Option<String>,
+
+    #[arg(long)]
+    block_hash_filter: Option<String>,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
-
+    let args = Args::parse();
     init_tracer_provider().expect("Failed to initialize tracer provider.");
 
     let _tracer = global::tracer("tracing-jaeger");
@@ -47,7 +58,15 @@ async fn main() {
         .and_then(|val| val.parse::<u64>().ok())
         .unwrap_or(1000);
 
-    let crawler = Crawler::new(provider, from_block, delay_time);
+    let crawler = Crawler::new(
+        provider,
+        from_block,
+        delay_time,
+        FilterOption {
+            tx_hash_filter: args.tx_hash_filter,
+            block_hash_filter: args.block_hash_filter,
+        },
+    );
     let _ = crawler.get_transactions().await;
 
     global::shutdown_tracer_provider();
