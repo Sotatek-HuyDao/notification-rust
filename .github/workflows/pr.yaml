@@ -1,0 +1,73 @@
+name: Pre-check
+
+on:
+  push:
+    branches: [ master]
+  pull_request:
+    branches: [ master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+
+jobs:
+  consumer:
+    name: Check Consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up cargo cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-consumer-${{ hashFiles('consumer/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-consumer-
+
+      - name: Run all checks and tests
+        run: |
+          cd consumer && 
+          cargo fmt --all -- --check &&
+          cargo clippy --all-targets --all-features &&
+          cargo test --verbose
+
+  crawler:
+    name: Check Crawler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up cargo cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-crawler-${{ hashFiles('crawler/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-crawler-
+
+      - name: Run all checks and tests
+        run: |
+          cd crawler && 
+          cargo fmt --all -- --check &&
+          cargo clippy --all-targets --all-features &&
+          cargo test --verbose
