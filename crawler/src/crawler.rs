@@ -210,7 +210,7 @@ mod tests {
 
     async fn get_test_transaction(
         tx: H256,
-        update_transaction: impl Fn(&mut Transaction) -> (),
+        update_transaction: impl Fn(&mut Transaction),
     ) -> Result<Option<Transaction>> {
         let mock_provider = MockProvider::new();
 
@@ -236,6 +236,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "This test requires the Kafka service"]
     async fn test_crawler_success() -> Result<()> {
         let mock_provider = get_mock()?;
 

@@ -19,8 +19,10 @@ pub fn get_mock() -> Result<MockProvider> {
     mock_provider.push(Some(transaction))?;
 
     // push result for second block
-    let mut block: Block<H256> = Block::default();
-    block.transactions = vec![H256::zero(), H256::zero()];
+    let block: Block<H256> = Block {
+        transactions: vec![H256::zero(), H256::zero()],
+        ..Default::default()
+    };
     mock_provider.push(block)?;
 
     // push result for first block
